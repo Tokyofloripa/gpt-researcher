@@ -14,6 +14,18 @@ logger = logging.getLogger(__name__)
 # Maximum words allowed in context (25k words for safety margin)
 MAX_CONTEXT_WORDS = 25000
 
+def _context_item_to_str(item) -> str:
+    """Convert a context item to string, extracting content from dicts.
+
+    The source curator returns lists of dicts with keys like 'content', 'url', 'title'.
+    This extracts the meaningful text rather than producing Python dict repr.
+    """
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return item.get('content') or item.get('raw_content') or item.get('body') or str(item)
+    return str(item)
+
 def count_words(text) -> int:
     """Count words in a text string. Handles both strings and lists."""
     if isinstance(text, list):
@@ -277,8 +289,7 @@ Format each question on a new line starting with 'Question: '"""}
                         'researchGoal': serp_query['researchGoal'],
                         'citations': results['citations'],
                         'context': "\n".join(
-                            str(item) if not isinstance(item, str) else item
-                            for item in context
+                            _context_item_to_str(item) for item in context
                         ) if isinstance(context, list) else (context or ""),
                         'sources': sources if sources else []
                     }
@@ -337,7 +348,9 @@ Format each question on a new line starting with 'Question: '"""}
                 all_visited_urls.update(deeper_results['visited_urls'])
                 all_citations.update(deeper_results['citations'])
                 if deeper_results.get('context'):
-                    all_context.extend(deeper_results['context'])
+                    all_context.extend(
+                        _context_item_to_str(item) for item in deeper_results['context']
+                    )
                 if deeper_results.get('sources'):
                     all_sources.extend(deeper_results['sources'])
 
@@ -402,7 +415,7 @@ Format each question on a new line starting with 'Question: '"""}
         # Add all research context (coerce dicts to strings if needed)
         if results.get('context'):
             for item in results['context']:
-                context_with_citations.append(str(item) if not isinstance(item, str) else item)
+                context_with_citations.append(_context_item_to_str(item))
 
         # Trim final context to word limit
         final_context = trim_context_to_word_limit(context_with_citations)

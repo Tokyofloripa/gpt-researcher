@@ -276,7 +276,10 @@ Format each question on a new line starting with 'Question: '"""}
                         'followUpQuestions': results['followUpQuestions'],
                         'researchGoal': serp_query['researchGoal'],
                         'citations': results['citations'],
-                        'context': "\n".join(context) if isinstance(context, list) else (context or ""),
+                        'context': "\n".join(
+                            str(item) if not isinstance(item, str) else item
+                            for item in context
+                        ) if isinstance(context, list) else (context or ""),
                         'sources': sources if sources else []
                     }
 
@@ -396,9 +399,10 @@ Format each question on a new line starting with 'Question: '"""}
             else:
                 context_with_citations.append(learning)
 
-        # Add all research context
+        # Add all research context (coerce dicts to strings if needed)
         if results.get('context'):
-            context_with_citations.extend(results['context'])
+            for item in results['context']:
+                context_with_citations.append(str(item) if not isinstance(item, str) else item)
 
         # Trim final context to word limit
         final_context = trim_context_to_word_limit(context_with_citations)

@@ -6,12 +6,12 @@ Invoked by research.sh when report_type=multi. Creates task.json from profile,
 runs the 7-agent LangGraph pipeline, copies outputs to structured dirs.
 """
 import asyncio
-import io
 import json
 import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 from datetime import date
 
@@ -396,10 +396,19 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
     original_cwd = os.getcwd()
     os.chdir(vendor)
 
-    # Capture stderr from the pipeline (ANSI-colored agent logs)
+    # Capture both stdout and stderr to the SAME temp file at fd level.
+    # Pipeline sends INFO/URLs/costs to fd 2 (logging), phase labels to fd 1 (print).
+    # Using one file ensures OS-level interleaving preserves temporal order.
+    real_stdout = sys.stdout
     real_stderr = sys.stderr
-    captured = io.StringIO()
-    sys.stderr = captured
+    saved_out_fd = os.dup(1)
+    saved_err_fd = os.dup(2)
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix='.log', prefix='pipeline_')
+    os.dup2(tmp_fd, 1)
+    os.dup2(tmp_fd, 2)
+    os.close(tmp_fd)
+    sys.stdout = open(1, 'w', closefd=False)
+    sys.stderr = open(2, 'w', closefd=False)
 
     try:
         chief = ChiefEditorAgent(task_config)
@@ -407,10 +416,19 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
         # Resolve to absolute path while still in vendor dir (chief.output_dir is relative)
         chief_output_abs = os.path.abspath(chief.output_dir)
     finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved_out_fd, 1)
+        os.dup2(saved_err_fd, 2)
+        os.close(saved_out_fd)
+        os.close(saved_err_fd)
+        sys.stdout = real_stdout
         sys.stderr = real_stderr
         os.chdir(original_cwd)
 
-    raw_log = captured.getvalue()
+    with open(tmp_path) as f:
+        raw_log = f.read()
+    os.unlink(tmp_path)
     parsed = parse_pipeline_log(raw_log)
 
     elapsed = time.time() - start

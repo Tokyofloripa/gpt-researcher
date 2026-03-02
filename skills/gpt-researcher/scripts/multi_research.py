@@ -115,12 +115,12 @@ def check_optional_formats() -> tuple:
     try:
         import weasyprint  # noqa: F401
         pdf_ok = True
-    except ImportError:
+    except (ImportError, OSError):
         print("INFO: weasyprint not available — PDF export disabled", file=sys.stderr)
     try:
         import docx  # noqa: F401
         docx_ok = True
-    except ImportError:
+    except (ImportError, OSError):
         print("INFO: python-docx not available — DOCX export disabled", file=sys.stderr)
     return pdf_ok, docx_ok
 
@@ -175,6 +175,27 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
         "verbose": True,
     }
 
+    # Handle review modes
+    if review_mode == "--review":
+        task_config["include_human_feedback"] = True
+        print("REVIEW MODE: Pipeline will pause after outline for your feedback.", file=sys.stderr)
+        print("Type your feedback to revise, or 'no' to accept and continue.", file=sys.stderr)
+    elif review_mode == "--review-approved":
+        feedback = ""
+        if not sys.stdin.isatty():
+            raw = sys.stdin.read().strip()
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    feedback = data.get("feedback", "")
+                except json.JSONDecodeError:
+                    feedback = raw
+        if feedback:
+            task_config["include_human_feedback"] = True
+            print(f"REVIEW-APPROVED: Injecting feedback: {feedback[:100]}...", file=sys.stderr)
+        else:
+            print("REVIEW-APPROVED: No feedback provided, running autonomously.", file=sys.stderr)
+
     # Dependency check + import
     check_deps()
     vendor = os.path.expanduser("~/cc/vendor/gpt-researcher")
@@ -190,6 +211,8 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
     try:
         chief = ChiefEditorAgent(task_config)
         result_state = await chief.run_research_task()
+        # Resolve to absolute path while still in vendor dir (chief.output_dir is relative)
+        chief_output_abs = os.path.abspath(chief.output_dir)
     finally:
         os.chdir(original_cwd)
 
@@ -197,7 +220,20 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
 
     # Build output directory, copy files
     output_dir = make_output_dir(query)
-    artifacts = copy_outputs(chief.output_dir, output_dir)
+
+    # Save outline to drafts/ for reference (review modes)
+    if review_mode in ("--review", "--review-approved"):
+        drafts_dir = os.path.join(output_dir, "drafts")
+        os.makedirs(drafts_dir, exist_ok=True)
+        outline = {
+            "title": result_state.get("title", ""),
+            "sections": result_state.get("sections", []),
+            "human_feedback": result_state.get("human_feedback", ""),
+        }
+        with open(os.path.join(drafts_dir, "outline.json"), "w") as f:
+            json.dump(outline, f, ensure_ascii=False, indent=2)
+
+    artifacts = copy_outputs(chief_output_abs, output_dir)
 
     # Extract results from state
     report = result_state.get("report", "")

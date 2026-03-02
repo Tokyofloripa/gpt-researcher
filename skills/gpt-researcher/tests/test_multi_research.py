@@ -122,20 +122,27 @@ class TestParsePhases:
     def test_extracts_phase_timing(self):
         log = (
             "\x1b[1;32mMASTER:\x1b[0m Starting...\n"
-            "INFO:     [10:00:05] something\n"
+            "INFO:     [10:00:05] start master\n"
+            "INFO:     [10:00:12] still master work\n"
             "\x1b[1;34mEDITOR:\x1b[0m Planning\n"
-            "INFO:     [10:00:10] editor work\n"
+            "INFO:     [10:00:15] editor start\n"
+            "INFO:     [10:00:25] editor done\n"
             "\x1b[1;33mRESEARCHER:\x1b[0m Searching\n"
-            "INFO:     [10:00:20] researcher work\n"
+            "INFO:     [10:00:30] researcher start\n"
+            "INFO:     [10:01:00] researcher done\n"
             "\x1b[1;35mWRITER:\x1b[0m Writing\n"
-            "INFO:     [10:00:50] writer work\n"
+            "INFO:     [10:01:05] writer work\n"
             "\x1b[1;36mPUBLISHER:\x1b[0m Publishing\n"
-            "INFO:     [10:01:01] publishing\n"
+            "INFO:     [10:01:10] publishing\n"
         )
         parsed = parse_pipeline_log(log)
         breakdown = parsed["elapsed_breakdown"]
-        # Should have some phases tracked
-        assert isinstance(breakdown, dict)
+        assert "master" in breakdown
+        assert breakdown["master"] == 7  # 10:00:12 - 10:00:05
+        assert "editor" in breakdown
+        assert breakdown["editor"] == 10  # 10:00:25 - 10:00:15
+        assert "researcher" in breakdown
+        assert breakdown["researcher"] == 30  # 10:01:00 - 10:00:30
 
     def test_empty_log_gives_empty_breakdown(self):
         parsed = parse_pipeline_log("")
@@ -205,7 +212,7 @@ class TestFormatSummary:
         assert "[multi]" in summary
         assert "32 URLs" in summary
         assert "4 cited" in summary
-        assert "$0.095" in summary
+        assert "$0.0950" in summary
 
     def test_no_costs(self):
         parsed = {
@@ -258,3 +265,28 @@ class TestFormatSummary:
         summary = format_summary(parsed, "quick", 3, 0)
         # Quick profile should note review was skipped
         assert "skipped" in summary.lower() or "quick" in summary.lower()
+
+    def test_scrape_failures_truncated_at_5_domains(self):
+        parsed = {
+            "research_urls": ["https://x.com"] * 10,
+            "costs": 0.01,
+            "scrape_failures": [
+                f"https://domain{i}.com/page" for i in range(8)
+            ],
+            "elapsed_breakdown": {},
+            "initial_report": "",
+        }
+        summary = format_summary(parsed, "standard", 5, 3)
+        assert "+3 more" in summary
+
+    def test_cost_formatting_fixed_decimals(self):
+        parsed = {
+            "research_urls": ["https://a.com"],
+            "costs": 0.1,
+            "scrape_failures": [],
+            "elapsed_breakdown": {},
+            "initial_report": "",
+        }
+        summary = format_summary(parsed, "quick", 3, 1)
+        # Should format with fixed decimals, not "$0.1"
+        assert "$0.1000" in summary

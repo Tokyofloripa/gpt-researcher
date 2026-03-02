@@ -95,8 +95,8 @@ def make_output_dir(query: str) -> str:
 
 
 def strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes from text."""
-    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+    """Remove ANSI escape codes from text (SGR, CSI, and OSC sequences)."""
+    return re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07", "", text)
 
 
 def parse_pipeline_log(raw_log: str) -> dict:
@@ -173,7 +173,7 @@ def parse_pipeline_log(raw_log: str) -> dict:
     for phase in phase_first_ts:
         if phase in phase_last_ts:
             diff = phase_last_ts[phase] - phase_first_ts[phase]
-            if diff > 0:
+            if diff > 0:  # Skip phases with single timestamp (< 1s)
                 elapsed_breakdown[phase] = diff
 
     # --- Initial report: text between MASTER: Starting... and first EDITOR: ---
@@ -216,7 +216,7 @@ def format_summary(parsed: dict, profile: str, sections: int, cited: int) -> str
 
     # Line 1: Overview
     url_count = len(parsed["research_urls"])
-    cost_str = f"${parsed['costs']}" if parsed["costs"] is not None else "N/A"
+    cost_str = f"${parsed['costs']:.4f}" if parsed["costs"] is not None else "N/A"
     out.append(
         f"[multi] Research complete: {sections} sections, "
         f"{url_count} URLs scraped, {cited} cited, {cost_str}"

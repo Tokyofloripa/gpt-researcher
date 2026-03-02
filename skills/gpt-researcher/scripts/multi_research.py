@@ -94,6 +94,170 @@ def make_output_dir(query: str) -> str:
     return os.path.expanduser(f"~/cc/output/research/{today}-{slug}")
 
 
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def parse_pipeline_log(raw_log: str) -> dict:
+    """Extract structured data from raw ChiefEditorAgent stderr output.
+
+    Parses URLs, costs, scrape failures, phase timing, and initial report
+    from the ANSI-colored log output of the 7-agent LangGraph pipeline.
+
+    Returns dict with keys: research_urls, costs, scrape_failures,
+    elapsed_breakdown, initial_report.
+    """
+    clean = strip_ansi(raw_log)
+    lines = clean.splitlines()
+
+    # --- URLs ---
+    url_pattern = re.compile(r"Added source url to research:\s*(https?://\S+)")
+    seen_urls = []
+    seen_url_set = set()
+    for line in lines:
+        m = url_pattern.search(line)
+        if m:
+            url = m.group(1)
+            if url not in seen_url_set:
+                seen_urls.append(url)
+                seen_url_set.add(url)
+
+    # --- Costs ---
+    cost_pattern = re.compile(r"Total Research Costs:\s*\$([0-9.]+)")
+    costs_total = 0.0
+    cost_found = False
+    for line in lines:
+        m = cost_pattern.search(line)
+        if m:
+            costs_total += float(m.group(1))
+            cost_found = True
+
+    # --- Scrape failures ---
+    fail_pattern = re.compile(r"Content too short or empty for\s*(https?://\S+)")
+    seen_fails = []
+    seen_fail_set = set()
+    for line in lines:
+        m = fail_pattern.search(line)
+        if m:
+            url = m.group(1)
+            if url not in seen_fail_set:
+                seen_fails.append(url)
+                seen_fail_set.add(url)
+
+    # --- Phase timing from INFO timestamps ---
+    # Pattern: INFO:     [HH:MM:SS]
+    ts_pattern = re.compile(r"INFO:\s+\[(\d{2}):(\d{2}):(\d{2})\]")
+    # Phase markers (after ANSI stripping)
+    phase_pattern = re.compile(
+        r"^(MASTER|EDITOR|RESEARCHER|REVIEWER|WRITER|PUBLISHER):"
+    )
+
+    current_phase = None
+    phase_first_ts = {}  # phase -> first timestamp in seconds
+    phase_last_ts = {}   # phase -> last timestamp in seconds
+
+    for line in lines:
+        pm = phase_pattern.match(line)
+        if pm:
+            current_phase = pm.group(1).lower()
+
+        tm = ts_pattern.search(line)
+        if tm and current_phase:
+            secs = int(tm.group(1)) * 3600 + int(tm.group(2)) * 60 + int(tm.group(3))
+            if current_phase not in phase_first_ts:
+                phase_first_ts[current_phase] = secs
+            phase_last_ts[current_phase] = secs
+
+    elapsed_breakdown = {}
+    for phase in phase_first_ts:
+        if phase in phase_last_ts:
+            diff = phase_last_ts[phase] - phase_first_ts[phase]
+            if diff > 0:
+                elapsed_breakdown[phase] = diff
+
+    # --- Initial report: text between MASTER: Starting... and first EDITOR: ---
+    initial_report = ""
+    in_master = False
+    report_lines = []
+    for line in lines:
+        if re.match(r"MASTER:\s*Starting", line):
+            in_master = True
+            continue
+        if in_master and re.match(r"EDITOR:", line):
+            break
+        if in_master:
+            report_lines.append(line)
+
+    if report_lines:
+        initial_report = "\n".join(report_lines).strip()
+
+    return {
+        "research_urls": seen_urls,
+        "costs": round(costs_total, 4) if cost_found else None,
+        "scrape_failures": seen_fails,
+        "elapsed_breakdown": elapsed_breakdown,
+        "initial_report": initial_report,
+    }
+
+
+def format_summary(parsed: dict, profile: str, sections: int, cited: int) -> str:
+    """Produce a clean multi-line summary from parsed pipeline log data.
+
+    Args:
+        parsed: Output of parse_pipeline_log()
+        profile: Profile name (quick, standard, thorough, government)
+        sections: Number of max_sections in profile
+        cited: Number of cited sources in final report
+    """
+    from urllib.parse import urlparse
+
+    out = []
+
+    # Line 1: Overview
+    url_count = len(parsed["research_urls"])
+    cost_str = f"${parsed['costs']}" if parsed["costs"] is not None else "N/A"
+    out.append(
+        f"[multi] Research complete: {sections} sections, "
+        f"{url_count} URLs scraped, {cited} cited, {cost_str}"
+    )
+
+    # Line 2: Phase timing
+    breakdown = parsed["elapsed_breakdown"]
+    if breakdown:
+        parts = [f"{phase} {secs}s" for phase, secs in breakdown.items()]
+        out.append(f"[multi] Phases: {' | '.join(parts)}")
+
+    # Line 3: Scrape failures
+    failures = parsed["scrape_failures"]
+    if failures:
+        # Extract unique domains
+        domains = []
+        seen = set()
+        for url in failures:
+            try:
+                domain = urlparse(url).netloc
+                if domain and domain not in seen:
+                    domains.append(domain)
+                    seen.add(domain)
+            except Exception:
+                pass
+        if domains:
+            domain_str = ", ".join(domains[:5])
+            if len(domains) > 5:
+                domain_str += f", +{len(domains) - 5} more"
+            out.append(
+                f"[multi] Scrape failures: {len(failures)} paywalled "
+                f"({domain_str})"
+            )
+
+    # Line 4: Review status
+    if profile == "quick":
+        out.append("[multi] Review: skipped (quick profile)")
+
+    return "\n".join(out)
+
+
 def check_deps() -> None:
     """Verify LangGraph and multi_agents are importable."""
     vendor = os.path.expanduser("~/cc/vendor/gpt-researcher")
@@ -114,10 +278,10 @@ def check_optional_formats() -> tuple:
     pdf_ok = False
     docx_ok = False
     try:
-        import weasyprint  # noqa: F401
+        from md2pdf.core import md2pdf as _  # noqa: F401
         pdf_ok = True
     except (ImportError, OSError):
-        print("INFO: weasyprint not available — PDF export disabled", file=sys.stderr)
+        print("INFO: md2pdf not available — PDF export disabled (install: brew install pango && pip install md2pdf)", file=sys.stderr)
     try:
         import docx  # noqa: F401
         docx_ok = True
@@ -232,13 +396,22 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
     original_cwd = os.getcwd()
     os.chdir(vendor)
 
+    # Capture stderr from the pipeline (ANSI-colored agent logs)
+    real_stderr = sys.stderr
+    captured = io.StringIO()
+    sys.stderr = captured
+
     try:
         chief = ChiefEditorAgent(task_config)
         result_state = await chief.run_research_task()
         # Resolve to absolute path while still in vendor dir (chief.output_dir is relative)
         chief_output_abs = os.path.abspath(chief.output_dir)
     finally:
+        sys.stderr = real_stderr
         os.chdir(original_cwd)
+
+    raw_log = captured.getvalue()
+    parsed = parse_pipeline_log(raw_log)
 
     elapsed = time.time() - start
 
@@ -259,6 +432,21 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
 
     artifacts = copy_outputs(chief_output_abs, output_dir)
 
+    # Save pipeline log (ANSI-stripped) and initial report
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, "pipeline.log")
+    with open(log_path, "w") as f:
+        f.write(strip_ansi(raw_log))
+    artifacts.append("pipeline.log")
+
+    if parsed["initial_report"]:
+        drafts_dir = os.path.join(output_dir, "drafts")
+        os.makedirs(drafts_dir, exist_ok=True)
+        ir_path = os.path.join(drafts_dir, "initial_report.md")
+        with open(ir_path, "w") as f:
+            f.write(parsed["initial_report"])
+        artifacts.append("drafts/initial_report.md")
+
     # Extract results from state
     report = result_state.get("report", "")
     sources = result_state.get("sources", [])
@@ -267,7 +455,7 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
         "report": report,
         "sources": sources,
         "source_count": len(sources),
-        "costs_usd": None,  # ChiefEditorAgent doesn't surface costs
+        "costs_usd": parsed["costs"],
         "elapsed_seconds": round(elapsed, 1),
         "report_type": "multi",
         "query": query,
@@ -278,6 +466,10 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
         "follow_guidelines": profile["follow_guidelines"],
         "human_review": review_mode in ("--review", "--review-approved"),
         "artifacts": artifacts,
+        "research_urls": parsed["research_urls"],
+        "research_url_count": len(parsed["research_urls"]),
+        "elapsed_breakdown": parsed["elapsed_breakdown"],
+        "scrape_failures": parsed["scrape_failures"],
     }
 
     # Write metadata.json (append to artifacts BEFORE writing so file and return value match)
@@ -287,6 +479,10 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
     os.makedirs(output_dir, exist_ok=True)
     with open(meta_path, "w") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
+
+    # Emit clean summary to stderr
+    summary = format_summary(parsed, profile_name, profile["max_sections"], len(sources))
+    print(summary, file=sys.stderr)
 
     return result
 

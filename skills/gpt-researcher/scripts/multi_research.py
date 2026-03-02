@@ -6,6 +6,7 @@ Invoked by research.sh when report_type=multi. Creates task.json from profile,
 runs the 7-agent LangGraph pipeline, copies outputs to structured dirs.
 """
 import asyncio
+import io
 import json
 import os
 import re
@@ -126,20 +127,31 @@ def check_optional_formats() -> tuple:
 
 
 def copy_outputs(chief_output_dir: str, target_dir: str) -> list:
-    """Copy publisher output files to our structured directory. Returns artifact list."""
+    """Copy publisher output files to our structured directory. Returns artifact list.
+
+    When multiple files share the same extension, picks the largest (most likely the report).
+    """
     artifacts = []
     if not os.path.isdir(chief_output_dir):
         return artifacts
 
     os.makedirs(target_dir, exist_ok=True)
+    friendly_map = {".md": "report.md", ".pdf": "report.pdf", ".docx": "report.docx"}
+
+    # Group by extension, keep largest file per extension
+    by_ext = {}
     for fname in os.listdir(chief_output_dir):
         src = os.path.join(chief_output_dir, fname)
         if not os.path.isfile(src):
             continue
         ext = os.path.splitext(fname)[1].lower()
-        friendly = {".md": "report.md", ".pdf": "report.pdf", ".docx": "report.docx"}.get(
-            ext, fname
-        )
+        if ext not in friendly_map:
+            continue
+        if ext not in by_ext or os.path.getsize(src) > os.path.getsize(by_ext[ext]):
+            by_ext[ext] = src
+
+    for ext, src in by_ext.items():
+        friendly = friendly_map[ext]
         dst = os.path.join(target_dir, friendly)
         shutil.copy2(src, dst)
         artifacts.append(friendly)
@@ -159,8 +171,14 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
                  "--review-approved" (resume with feedback from stdin)
     """
     start = time.time()
-    profile_name = detect_profile_name(config_path)
-    profile = MULTI_PROFILES.get(profile_name, MULTI_PROFILES["standard"])
+    raw_profile_name = detect_profile_name(config_path)
+    profile = MULTI_PROFILES.get(raw_profile_name)
+    if profile is None:
+        profile_name = "standard"
+        profile = MULTI_PROFILES["standard"]
+        print(f"INFO: Profile '{raw_profile_name}' not in multi-agent profiles, using 'standard'", file=sys.stderr)
+    else:
+        profile_name = raw_profile_name
     pdf_ok, docx_ok = check_optional_formats()
 
     # Build task config
@@ -178,8 +196,12 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
     # Handle review modes
     if review_mode == "--review":
         task_config["include_human_feedback"] = True
-        print("REVIEW MODE: Pipeline will pause after outline for your feedback.", file=sys.stderr)
-        print("Type your feedback to revise, or 'no' to accept and continue.", file=sys.stderr)
+        if sys.stdin.isatty():
+            print("REVIEW MODE: Pipeline will pause after outline for your feedback.", file=sys.stderr)
+            print("Type your feedback to revise, or 'no' to accept and continue.", file=sys.stderr)
+        else:
+            print("WARNING: --review requires an interactive terminal. "
+                  "Use --review-approved with piped feedback for headless mode.", file=sys.stderr)
     elif review_mode == "--review-approved":
         feedback = ""
         if not sys.stdin.isatty():
@@ -187,11 +209,13 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
             if raw:
                 try:
                     data = json.loads(raw)
-                    feedback = data.get("feedback", "")
+                    feedback = data.get("feedback", raw)
                 except json.JSONDecodeError:
                     feedback = raw
         if feedback:
             task_config["include_human_feedback"] = True
+            # Replace stdin so HumanAgent's input() call reads the pre-loaded feedback
+            sys.stdin = io.StringIO(feedback)
             print(f"REVIEW-APPROVED: Injecting feedback: {feedback[:100]}...", file=sys.stderr)
         else:
             print("REVIEW-APPROVED: No feedback provided, running autonomously.", file=sys.stderr)
@@ -256,13 +280,13 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
         "artifacts": artifacts,
     }
 
-    # Write metadata.json
+    # Write metadata.json (append to artifacts BEFORE writing so file and return value match)
+    if "metadata.json" not in artifacts:
+        artifacts.append("metadata.json")
     meta_path = os.path.join(output_dir, "metadata.json")
     os.makedirs(output_dir, exist_ok=True)
     with open(meta_path, "w") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    if "metadata.json" not in artifacts:
-        artifacts.append("metadata.json")
 
     return result
 

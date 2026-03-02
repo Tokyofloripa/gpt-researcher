@@ -69,7 +69,7 @@ set +a
 
 # Route: multi -> multi_research.py, everything else -> research.py
 if [ "$REPORT_TYPE" = "multi" ]; then
-  exec "$VENV" "$SCRIPT_DIR/multi_research.py" "$QUERY" "$CONFIG" $REVIEW_FLAG
+  exec "$VENV" "$SCRIPT_DIR/multi_research.py" "$QUERY" "$CONFIG" ${REVIEW_FLAG:+"$REVIEW_FLAG"}
 else
   exec "$VENV" "$SCRIPT_DIR/research.py" "$QUERY" "$REPORT_TYPE" "$CONFIG"
 fi

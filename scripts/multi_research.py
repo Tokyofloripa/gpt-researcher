@@ -6,6 +6,7 @@ Invoked by research.sh when report_type=multi. Creates task.json from profile,
 runs the 7-agent LangGraph pipeline, copies outputs to structured dirs.
 """
 import asyncio
+import io
 import json
 import os
 import re
@@ -150,7 +151,7 @@ def parse_pipeline_log(raw_log: str) -> dict:
     ts_pattern = re.compile(r"INFO:\s+\[(\d{2}):(\d{2}):(\d{2})\]")
     # Phase markers (after ANSI stripping)
     phase_pattern = re.compile(
-        r"^(MASTER|EDITOR|RESEARCHER|REVIEWER|WRITER|PUBLISHER):"
+        r"^(MASTER|EDITOR|RESEARCHER|REVIEWER|REVISOR|WRITER|PUBLISHER):"
     )
 
     current_phase = None
@@ -176,15 +177,15 @@ def parse_pipeline_log(raw_log: str) -> dict:
             if diff > 0:  # Skip phases with single timestamp (< 1s)
                 elapsed_breakdown[phase] = diff
 
-    # --- Initial report: text between MASTER: Starting... and first EDITOR: ---
+    # --- Initial report: text between first MASTER: line and first EDITOR: ---
     initial_report = ""
     in_master = False
     report_lines = []
     for line in lines:
-        if re.match(r"MASTER:\s*Starting", line):
+        if not in_master and re.match(r"^MASTER:", line):
             in_master = True
             continue
-        if in_master and re.match(r"EDITOR:", line):
+        if in_master and re.match(r"^EDITOR:", line):
             break
         if in_master:
             report_lines.append(line)
@@ -247,8 +248,8 @@ def format_summary(parsed: dict, profile: str, sections: int, cited: int) -> str
             if len(domains) > 5:
                 domain_str += f", +{len(domains) - 5} more"
             out.append(
-                f"[multi] Scrape failures: {len(failures)} paywalled "
-                f"({domain_str})"
+                f"[multi] Scrape failures: {len(failures)} URLs "
+                f"unreadable/failed ({domain_str})"
             )
 
     # Line 4: Review status
@@ -379,10 +380,13 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
         if feedback:
             task_config["include_human_feedback"] = True
             # Replace stdin so HumanAgent's input() call reads the pre-loaded feedback
+            # Original stdin is saved and restored in the finally block below
             sys.stdin = io.StringIO(feedback)
             print(f"REVIEW-APPROVED: Injecting feedback: {feedback[:100]}...", file=sys.stderr)
         else:
             print("REVIEW-APPROVED: No feedback provided, running autonomously.", file=sys.stderr)
+
+    real_stdin = sys.stdin
 
     # Dependency check + import
     check_deps()
@@ -418,12 +422,16 @@ async def run(query: str, config_path: str, review_mode: str = "") -> dict:
     finally:
         sys.stdout.flush()
         sys.stderr.flush()
+        # Close temporary stream wrappers to avoid fd leaks
+        sys.stdout.close()
+        sys.stderr.close()
         os.dup2(saved_out_fd, 1)
         os.dup2(saved_err_fd, 2)
         os.close(saved_out_fd)
         os.close(saved_err_fd)
         sys.stdout = real_stdout
         sys.stderr = real_stderr
+        sys.stdin = real_stdin
         os.chdir(original_cwd)
 
     with open(tmp_path) as f:

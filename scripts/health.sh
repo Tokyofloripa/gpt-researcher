@@ -54,7 +54,7 @@ except Exception as e:
 # 3. Required API key
 print()
 api_key = os.getenv('OPENAI_API_KEY', '')
-print(f'OPENAI_API_KEY: {\"SET (\" + api_key[:8] + \"...)\" if api_key else \"MISSING - REQUIRED\"}')
+print(f'OPENAI_API_KEY: {\"SET\" if api_key else \"MISSING - REQUIRED\"}')
 
 # 4. Premium retriever keys
 print()

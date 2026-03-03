@@ -30,6 +30,7 @@ async def write_text_to_md(text: str, path: str) -> str:
     Returns:
         str: The file path of the generated Markdown file.
     """
+    os.makedirs(path, exist_ok=True)
     task = uuid.uuid4().hex
     file_path = f"{path}/{task}.md"
     await write_to_file(file_path, text)

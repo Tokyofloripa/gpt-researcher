@@ -63,10 +63,12 @@ async def main(query: str, report_type: str, config_path: str):
 
     elapsed = time.time() - start
 
+    sources = list(researcher.get_source_urls())
+
     result = {
         "report": report,
-        "sources": list(researcher.get_source_urls()),
-        "source_count": len(researcher.get_source_urls()),
+        "sources": sources,
+        "source_count": len(sources),
         "costs_usd": round(researcher.get_costs(), 4),
         "elapsed_seconds": round(elapsed, 1),
         "report_type": report_type,
